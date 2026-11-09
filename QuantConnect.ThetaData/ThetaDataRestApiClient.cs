@@ -73,6 +73,14 @@ namespace QuantConnect.Lean.DataSource.ThetaData
 
         private static bool _legacyPortWarningFired;
 
+        // Parts of the HTTP 472 reply texts that Theta Terminal v3 sends: the 3 text
+        // starts, and the parts of the 2 texts that name a missing strike or expiration.
+        private const string NoData472 = "No data found for your request";
+        private const string MarketClosed472 = "The market was closed for every day";
+        private const string UnknownSymbol472 = "Unknown symbol:";
+        private const string MissingStrike472 = " strike for ";
+        private const string MissingExpiration472 = " options expire on ";
+
         private readonly HttpClient _httpClient;
         private readonly RateGate? _rateGate;
         private readonly SemaphoreSlim _concurrencyLimiter;
@@ -285,7 +293,8 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         }
 
         /// <summary>
-        /// Sends 1 GET request. Returns the body, or null when ThetaData has no data (HTTP 472).
+        /// Sends 1 GET request. Returns the body, or null for an HTTP 472 reply that says
+        /// there is no data or that the market was closed. Any other 472 reply throws.
         /// </summary>
         private async Task<string?> SendAsync(Uri requestUri, CancellationToken cancellationToken)
         {
@@ -308,10 +317,27 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                     {
                         case 200:
                             return body;
-                        // docs: https://thetadata.net/docs/Articles/Errors-Exchanges-Conditions/Error-Codes.html
+                        // The meaning of each code and each 472 text: the LeanWork runbook table,
+                        // https://github.com/econstantin/LeanWork/blob/main/docs/operations/thetadata-options.md#theta-terminal-reply-codes
                         case 472:
-                            Log.Debug($"{nameof(ThetaDataRestApiClient)}.{nameof(SendAsync)}: No data for {requestUri}");
-                            return null;
+                        {
+                            var text = body.TrimStart();
+                            if (text.StartsWith(NoData472, StringComparison.Ordinal) || text.StartsWith(MarketClosed472, StringComparison.Ordinal))
+                            {
+                                Log.Debug($"{nameof(ThetaDataRestApiClient)}.{nameof(SendAsync)}: No data for {requestUri}");
+                                return null;
+                            }
+                            if (text.StartsWith(UnknownSymbol472, StringComparison.Ordinal))
+                            {
+                                throw new ThetaDataRequestException($"ThetaData rejected {requestUri} for an unknown ticker (HTTP 472): {Truncate(body)}", statusCode);
+                            }
+                            if (text.StartsWith("No ", StringComparison.Ordinal)
+                                && (text.Contains(MissingStrike472, StringComparison.Ordinal) || text.Contains(MissingExpiration472, StringComparison.Ordinal)))
+                            {
+                                throw new ThetaDataRequestException($"ThetaData rejected {requestUri} for a strike or an expiration that does not exist (HTTP 472): {Truncate(body)}", statusCode);
+                            }
+                            throw new ThetaDataRequestException($"ThetaData sent an unknown reply to {requestUri} (HTTP 472): '{Truncate(body)}'", statusCode);
+                        }
                         case 403:
                         case 471:
                             throw new ThetaDataRequestException($"ThetaData denied {requestUri} (HTTP {statusCode}): {Truncate(body)}. Your ThetaData plan does not include this data.", statusCode);

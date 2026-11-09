@@ -121,8 +121,12 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.AreEqual(6, rows.Select(x => (x.Contract!.Expiration, x.Contract.Strike, x.Contract.Right)).Distinct().Count());
         }
 
+        // The 472 reply texts of the LeanWork runbook table:
+        // https://github.com/econstantin/LeanWork/blob/main/docs/operations/thetadata-options.md#theta-terminal-reply-codes
         [TestCase("No data found for your request")]
-        [TestCase("")]
+        [TestCase("The market was closed for every day from 2016-01-01 to 2016-01-01 (weekends and holidays only)")]
+        [TestCase("The market was closed for every day from 2016-01-01 to 2016-01-01 (weekends and holidays only); there is no data for those dates.")]
+        [TestCase("\n No data found for your request")]
         public void ReturnsNoRowsForNoDataAndDoesNotRetry(string body)
         {
             var handler = new FakeThetaDataHandler(_ => FakeThetaDataHandler.Respond(472, body));
@@ -131,6 +135,25 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             var rows = client.GetRows<EndOfDayRow>(ThetaDataEndpoints.EndOfDay(SecurityType.Equity), SpyEod);
 
             Assert.IsEmpty(rows);
+            Assert.AreEqual(1, handler.Requests.Count);
+        }
+
+        [TestCase("Unknown symbol: ZZZZQ. Use /v3/stock/list/symbols to see all available symbols.", "unknown ticker")]
+        [TestCase("Unknown symbol: QZXQ. Use /v3/option/list/symbols to see all available symbols.", "unknown ticker")]
+        [TestCase("No 1 strike for SPY options expiring 2024-01-19. Use /v3/option/list/strikes?symbol=SPY&expiration=20240119 to see available strikes.", "does not exist")]
+        [TestCase("No SPY options expire on 2024-01-20. Use /v3/option/list/expirations?symbol=SPY to see available expirations.", "does not exist")]
+        [TestCase("A text the table does not hold", "unknown reply")]
+        [TestCase("", "unknown reply")]
+        public void ThrowsWithoutRetryForAnUnknownTickerOrAnUnknown472Text(string body, string expected)
+        {
+            var handler = new FakeThetaDataHandler(_ => FakeThetaDataHandler.Respond(472, body));
+            using var client = CreateClient(handler);
+
+            var exception = Assert.Throws<ThetaDataRequestException>(() => client.GetRows<EndOfDayRow>(ThetaDataEndpoints.EndOfDay(SecurityType.Equity), SpyEod));
+
+            Assert.AreEqual(472, exception!.StatusCode);
+            Assert.IsFalse(exception.IsEntitlementError);
+            StringAssert.Contains(expected, exception.Message);
             Assert.AreEqual(1, handler.Requests.Count);
         }
 
